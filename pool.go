@@ -4,21 +4,32 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
+type Int64 []int64
+
+func (a Int64) Len() int           { return len(a) }
+func (a Int64) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a Int64) Less(i, j int) bool { return a[i] < a[j] }
+
 type poolValues struct {
-	Values []int64
+	Values []int
 	Mx     sync.Mutex
 }
 
 var (
-	pool = map[int64]*poolValues{}
-	mx   = sync.Mutex{}
+	pool               = map[int]*poolValues{}
+	mx                 = sync.Mutex{}
+	currentDir         = ""
+	lsn          int64 = 0
+	mainTypeFile       = "main"
+	walTypeFile        = "wal"
 )
 
 func init() {
@@ -26,32 +37,70 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	currentDir = dir
 
-	dat, err := ioutil.ReadFile(fmt.Sprintf("%s/pool.csv", dir))
+	// Read from disk
+	loadFromFile(fmt.Sprintf("%s/pool.csv", currentDir), mainTypeFile)
+
+	// Read from WAL
+	files, err := os.ReadDir(fmt.Sprintf("%s/wals", currentDir))
+	if err != nil {
+		panic(err)
+	}
+	fileNames := make([]int64, len(files))
+	for i, file := range files {
+		fileNames[i], _ = strconv.ParseInt(file.Name(), 10, 64)
+	}
+	sort.Sort(Int64(fileNames))
+	for _, fileName := range fileNames {
+		if lsn < fileName {
+			loadFromFile(fmt.Sprintf("%s/wals/%d", currentDir, fileName), walTypeFile)
+		}
+	}
+}
+
+func loadFromFile(fileName, typeFile string) {
+	dat, err := ioutil.ReadFile(fileName)
 	if err != nil {
 		panic(err)
 	}
 	r := csv.NewReader(strings.NewReader(string(dat)))
 	records, err := r.ReadAll()
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	for _, record := range records {
+	for i, record := range records {
+		if i == 0 && typeFile == "main" {
+			lsn, _ = strconv.ParseInt(record[0], 10, 64)
+			continue
+		}
 		poolId, _ := strconv.ParseInt(record[0], 10, 64)
 		poolStringValues := strings.Split(record[1], "|")
-		values := make([]int64, len(poolStringValues))
+		values := make([]int, len(poolStringValues))
 		for i, poolStringValue := range poolStringValues {
 			value, _ := strconv.ParseInt(poolStringValue, 10, 64)
-			values[i] = value
+			values[i] = int(value)
 		}
-		pool[poolId] = &poolValues{
-			Values: values,
-			Mx:     sync.Mutex{},
+		if poolV, ok := pool[int(poolId)]; ok {
+			poolV.Values = append(poolV.Values, values...)
+		} else {
+			pool[int(poolId)] = &poolValues{
+				Values: values,
+				Mx:     sync.Mutex{},
+			}
 		}
 	}
 }
 
-func poolAdd(poolId int64, values []int64) (status string) {
+func poolGetById(poolId int) []int {
+	poolValues, ok := pool[poolId]
+	if ok {
+		return poolValues.Values
+	}
+	return []int{}
+}
+
+func poolAdd(poolId int, values []int) (status string, err error) {
 	if _, ok := pool[poolId]; !ok {
 		mx.Lock()
 		pool[poolId] = &poolValues{}
@@ -60,19 +109,51 @@ func poolAdd(poolId int64, values []int64) (status string) {
 	} else {
 		status = "APPENDED"
 	}
-	pool[poolId].Add(values)
-	return
+	err = pool[poolId].Add(values, poolId)
+	return status, err
 }
 
-func poolQuantile(poolId int64, percentile float64) (quantile float64, totalElement int64) {
+func poolQuantile(poolId int, percentile float64) (quantile float64, totalElement int) {
+	percentile = percentile / 100
 	if _, ok := pool[poolId]; !ok {
 		return
+	}
+	values := pool[poolId].Values
+	totalElement = len(values)
+
+	// Sort
+	sort.Ints(values)
+	index := percentile * float64(totalElement-1)
+	lhs := int(index)
+	delta := index - float64(lhs)
+	if len(values) == 0 {
+		return 0.0, 0
+	}
+
+	if lhs == totalElement-1 {
+		quantile = float64(values[lhs])
+	} else {
+		quantile = (1-delta)*float64(values[lhs]) + delta*float64(values[lhs+1])
 	}
 	return
 }
 
-func (r *poolValues) Add(values []int64) {
+func (r *poolValues) Add(values []int, poolId int) error {
 	r.Mx.Lock()
+	defer func() {
+		r.Mx.Unlock()
+	}()
+
+	// Write ahead log
+	stringValues := make([]string, len(values))
+	for i, value := range values {
+		stringValues[i] = fmt.Sprintf("%d", value)
+	}
+	d1 := []byte(fmt.Sprintf("%d,%s", poolId, strings.Join(stringValues, "|")))
+	err := ioutil.WriteFile(fmt.Sprintf("%s/wals/%d", currentDir, time.Now().UnixNano()), d1, 0644)
+	if err != nil {
+		return err
+	}
 	r.Values = append(r.Values, values...)
-	r.Mx.Unlock()
+	return nil
 }

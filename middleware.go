@@ -13,11 +13,13 @@ func RegisterRoute(method, route string, handle handler) {
 
 	// Check Method
 	var checkMethod = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Type", "application/json")
 		if r.Method == method {
 			handle(w, r)
 			return
 		}
 		http.NotFound(w, r)
 	}
+
 	http.HandleFunc(route, checkMethod)
 }

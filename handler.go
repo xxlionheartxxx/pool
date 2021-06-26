@@ -5,11 +5,24 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strconv"
 )
 
+// get value by poolId
+func getByPoolId(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	id, err := strconv.ParseInt(r.Form.Get("id"), 10, 64)
+	if err != nil {
+		fmt.Fprintf(w, `{"error": "%v"}`, err)
+		return
+	}
+	values := poolGetById(int(id))
+	fmt.Fprintf(w, `{"data": "%v"}`, values)
+}
+
 type addBody struct {
-	PoolId     int64   `json:"poolId"`
-	PoolValues []int64 `json:"poolValues"`
+	PoolId     int   `json:"poolId"`
+	PoolValues []int `json:"poolValues"`
 }
 
 type addResponse struct{}
@@ -21,18 +34,22 @@ func add(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	status := poolAdd(body.PoolId, body.PoolValues)
+	status, err := poolAdd(body.PoolId, body.PoolValues)
+	if err != nil {
+		fmt.Fprintf(w, `{"error": "%v"}`, err)
+		return
+	}
 	fmt.Fprintf(w, `{"status": "%s"}`, status)
 }
 
 type quantileBody struct {
-	PoolId     int64   `json:"poolId"`
+	PoolId     int     `json:"poolId"`
 	Percentile float64 `json:"percentile"`
 }
 
 type quantileResponse struct {
-	TotalElement int64
-	Quantile     int64
+	TotalElement int
+	Quantile     int
 }
 
 // quantile caculator
@@ -43,7 +60,7 @@ func quantile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	quantile, total := poolQuantile(body.PoolId, body.Percentile)
-	fmt.Fprintf(w, `{"quantile": "%.2f", "totalElement": %d}`, quantile, total)
+	fmt.Fprintf(w, `{"quantile": %.2f, "totalElement": %d}`, quantile, total)
 }
 
 // Util
