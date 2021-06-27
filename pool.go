@@ -24,12 +24,15 @@ type poolValues struct {
 }
 
 var (
-	pool               = map[int]*poolValues{}
-	mx                 = sync.Mutex{}
-	currentDir         = ""
-	lsn          int64 = 0
-	mainTypeFile       = "main"
-	walTypeFile        = "wal"
+	pool                = map[int]*poolValues{}
+	mx                  = sync.Mutex{}
+	lsnMx               = sync.RWMutex{}
+	currentDir          = ""
+	checkPointLSN int64 = 0
+	isChange      bool  = false
+	mainTypeFile        = "main"
+	walTypeFile         = "wal"
+	csvSeparate         = "|"
 )
 
 func init() {
@@ -40,7 +43,7 @@ func init() {
 	currentDir = dir
 
 	// Read from disk
-	loadFromFile(fmt.Sprintf("%s/pool.csv", currentDir), mainTypeFile)
+	loadFromFile(fmt.Sprintf("%s/data/pool.csv", currentDir), mainTypeFile)
 
 	// Read from WAL
 	files, err := os.ReadDir(fmt.Sprintf("%s/wals", currentDir))
@@ -53,10 +56,13 @@ func init() {
 	}
 	sort.Sort(Int64(fileNames))
 	for _, fileName := range fileNames {
-		if lsn < fileName {
+		if checkPointLSN < fileName {
+			isChange = true
 			loadFromFile(fmt.Sprintf("%s/wals/%d", currentDir, fileName), walTypeFile)
 		}
 	}
+	// Start storage writer
+	go writeToStorage()
 }
 
 func loadFromFile(fileName, typeFile string) {
@@ -71,11 +77,11 @@ func loadFromFile(fileName, typeFile string) {
 	}
 	for i, record := range records {
 		if i == 0 && typeFile == "main" {
-			lsn, _ = strconv.ParseInt(record[0], 10, 64)
+			checkPointLSN, _ = strconv.ParseInt(record[0], 10, 64)
 			continue
 		}
 		poolId, _ := strconv.ParseInt(record[0], 10, 64)
-		poolStringValues := strings.Split(record[1], "|")
+		poolStringValues := strings.Split(record[1], csvSeparate)
 		values := make([]int, len(poolStringValues))
 		for i, poolStringValue := range poolStringValues {
 			value, _ := strconv.ParseInt(poolStringValue, 10, 64)
@@ -139,9 +145,14 @@ func poolQuantile(poolId int, percentile float64) (quantile float64, totalElemen
 }
 
 func (r *poolValues) Add(values []int, poolId int) error {
+	// Lock when write to storage
+	lsnMx.RLock()
+
+	// Lock per poolId
 	r.Mx.Lock()
 	defer func() {
 		r.Mx.Unlock()
+		lsnMx.RUnlock()
 	}()
 
 	// Write ahead log
@@ -149,11 +160,12 @@ func (r *poolValues) Add(values []int, poolId int) error {
 	for i, value := range values {
 		stringValues[i] = fmt.Sprintf("%d", value)
 	}
-	d1 := []byte(fmt.Sprintf("%d,%s", poolId, strings.Join(stringValues, "|")))
+	d1 := []byte(fmt.Sprintf("%d,%s", poolId, strings.Join(stringValues, csvSeparate)))
 	err := ioutil.WriteFile(fmt.Sprintf("%s/wals/%d", currentDir, time.Now().UnixNano()), d1, 0644)
 	if err != nil {
 		return err
 	}
 	r.Values = append(r.Values, values...)
+	isChange = true
 	return nil
 }
