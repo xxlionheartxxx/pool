@@ -1,5 +1,9 @@
 # Pool
-  Store, add and quantile numeric values. I use one file to store all data relative to pool. Every action add value to one array, I store info into each file in folder *wals* (write ahead log). It guaranteed the pool not lose when server down. 
+  Store, add and quantile numeric values. When start server load pool from disk to buffer, then check the checkpoint. If wals have time large than checkpoint, server continue load all the wals to disk. In buffer, have a mutex for pool, it is used for lock all pool when insert new poolId. And each poolId has one mutex for locking when append new values.
+  When insert values into a poolId, the server writes infos to disk (wals) then append to buffer. It has a background gorountine stores buffer to disk each 5 second if have new wals. 
+
+# Github
+- https://github.com/xxlionheartxxx/pool
 
 # API
 - POST locahost:8080/add 
@@ -61,4 +65,9 @@ curl --location --request GET 'localhost:8080?id=1'
 - wals: each file in this folder is info about add action. The file contains,pair poolId and poolValues, 1 row. The name of file is time of action take place.
 
 # How it resilience
-![image info](./image.jpeg)
+## Start
+![image info](./pic/start.png)
+## Add Request
+![image info](./pic/add-request.png)
+## Background goroutine
+![image info](./pic/background-goroutine.png)
